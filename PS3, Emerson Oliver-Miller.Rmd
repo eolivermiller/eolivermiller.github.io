@@ -1,0 +1,171 @@
+---
+title: "Problem Set 3, Emerson Oliver-Miller"
+output: html_document
+date: "2023-10-18"
+---
+
+##Step 1
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(rpart)
+library(glmnet)
+library(rlang)
+library(lubridate)
+library(caret)
+library(dummy)
+library(gamlr)
+library(vip)
+library(rmarkdown)
+library(iml)
+library(rpart.plot)
+library(GGally)
+```
+
+
+##Step 2
+
+```{r}
+cars = read_csv("/Users/emersonmiller/Documents/School/2023/Data Mining/Problem Set 3/ToyotaCorolla.csv")
+glimpse(cars)
+```
+In the *cars* dataset, there are a total of 1,426 observations across 39 different columns. The data types included are numeric (36 instances) and categorical (3 instances).
+
+
+
+```{r}
+cars = cars %>%
+  select (-Model, -Mfg_Month, -Id, -Cylinders) %>%
+  rename(Age = Age_08_04)
+```
+
+
+We need to find out if there are any missing values in the data set. However we first need to better represent the features in our data. To do this we can change some of the features to nominal data types and then into factor data. Recombining these subsets of the data will help us work with it. 
+
+```{r}
+cars_fct = cars %>%
+  select(-Price, -Age, -KM, -HP, -CC, -Quarterly_Tax, -Weight) %>%
+  mutate_all(.funs = factor)
+
+cars_num = cars %>%
+  select(Price, Age, KM, HP, CC, Weight, Quarterly_Tax)
+
+cars = bind_cols(cars_num, cars_fct)
+```
+
+```{r}
+summary(cars_num)
+```
+There are no missing values for each feature so we won't be required to put values in. 
+
+## Step 3
+```{r}
+lm_Price = train(Price ~ .,
+                 data = cars,
+                 method = "lm")
+lm_Price
+```
+
+
+In this code we use the linear regression method for training a model. Price is the dependent variable and all other variables in the dataset *cars* are the independent variables. We find that the RMSE is 1591.299 which means that on average, the predictions of the model are off by 1591.299 dollars. Our Rsquared value of 0.8105167 meas that approximately 81.05% of the variance in Price is explained by the remaining variables in the dataset. This is close to 100% and suggests that the linnear regression model is a good fit for explaining the variability in Price. Transformations to the Price variable will not be necessary 
+
+## Step 4
+Let's create quick scatterplots to compare the relationships between the numeric features in the *cars* data set and Price. 
+```{r}
+caret::featurePlot(keep(cars, is.numeric), cars$Price, plot = "scatter")
+```
+The strongest relationships with Price we observe are with the features Age and KM. These features saw a decrease in Price as Age and KM increased. This is a logical observation as the price of cars generally goes down as the car becomes older or the car accumulates large numbers of KMs on the gauge. The relationships for these two combinations are quite high.
+
+
+## Step 5
+
+We want to tell if there are any predictor variables in the data that are too strongly related to each other. Let's look at a pair-wise plot matrix for the numeric variables in the *cars* dataset to visualize the relationships and patterns in the data. 
+
+```{r}
+cars %>%
+  keep(is.numeric) %>%
+  ggpairs()
+```
+Besides the previously mentioned negative correlations between Price and Age/KM, we can see that there is a slight positive correlation between Price and Weight. This could make sense when a heavier car might have more components that cost money and increase the Price while lighter cars might be made with cheaper materials and have lower costs. In this data I do not fear that there are any predictor variables that are too stronlgy related with each other. 
+
+## Step 6
+
+We want to partition our data into training and testing sets. First let's create some dummy variables for categorical features and combine them with the other numeric variables.  
+```{r}
+cars_dum = dummy(cars, int = TRUE)
+cars_num = cars %>%
+  keep(is.numeric)
+cars = bind_cols(cars_num, cars_dum)
+rm(cars_dum, cars_num)
+```
+
+Now let's split the *cars* data set into training and testing sets. The training will include about 70% of the data and the testing will include about 30%. Training data will train the predictive model and the testing set will be used to evaluate the model's effectivness and performance. 
+
+```{r}
+set.seed(6547)
+samp = createDataPartition(cars$Price, p = 0.7, list = FALSE)
+training = cars[samp,]
+testing = cars[-samp,]
+rm(samp)
+```
+
+## Step 7
+
+We can train a decision tree model for predicting the Price variable based on other features in the training dataset. This decision tree model uses repeated cross-validation.
+```{r}
+train_ctrl = trainControl(method = "repeatedcv", number = 20, repeats = 10)
+tree = train(Price ~.,
+             data = training,
+             method = "rpart",
+             trControl = train_ctrl,
+             tuneGrid = expand.grid(cp = seq(0.0, 0.1, 0.01)))
+            control = rpart.control(method = "anova", minsplit = 1, minibucket = 1)
+
+tree
+```
+
+Now we can visualize the decision tree.
+```{r}
+rpart_model <- tree$finalModel
+prp(rpart_model)
+```
+
+## Step 8
+
+Let's look at the feature importance to determine which ones have the biggest effects. 
+```{r}
+lm_model <- lm(Price ~ ., data = cars)
+
+# Feature importance
+vip::vip(lm_model)
+```
+The feature with the most importance is KM, followed by Mfg_Year_2001. It might be okay to remove Quarterly_Tax and HP since they are lower in importance. 
+
+## Step 9
+
+We can remove a few variables: Mfg_year_2001 and KM. Afterwards, lets retrain the model and cross validate to tune our tree
+```{r}
+selected_features <- c("Mfg_Year_2001", "KM")
+
+training_subset <- training[, c(selected_features)]
+
+train_ctrl = trainControl(method = "repeatedcv", number = 20, repeats = 10)
+tree = train(Price ~.,
+             data = training,
+             method = "rpart",
+             trControl = train_ctrl,
+             tuneGrid = expand.grid(cp = seq(0.0, 0.1, 0.01)))
+             control = rpart.control(method = "anova", minsplit = 1, minibucket = 1)
+
+tree
+```
+
+## Step 10
+```{r}
+test_predictions <- predict(tree, cars_fct = testing)
+
+test_rmse <- sqrt(mean((test_predictions - testing$Price)^2))
+```
+We lowered our RMSE for the training data and this indicates that there is less error. It worked better for our training data but this may not be the same for new data Corolla might want to observe. 
+
